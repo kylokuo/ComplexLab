@@ -151,6 +151,15 @@ export function mean(values) {
   return clean.length ? clean.reduce((sum, value) => sum + value, 0) / clean.length : null;
 }
 
+export function activityReferenceDelta({ complexId, plate, sampleCoordinate, controlBySample = {}, referenceCoordinates = [] }) {
+  if (!plate) return null;
+  if (complexId === 'I') {
+    const controlCoordinate = controlBySample[sampleCoordinate];
+    return controlCoordinate ? delta(getWell(plate, controlCoordinate)) : null;
+  }
+  return mean(referenceCoordinates.map((coordinate) => delta(getWell(plate, coordinate))).filter((value) => Number.isFinite(value)));
+}
+
 export function fitLinear(points) {
   const clean = points.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
   if (clean.length < 2) return null;

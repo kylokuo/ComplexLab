@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bcaConcentrationToCpr, buildBcaCurve, calculateActivity, emptyBcaConfig, fitLinear, normalizeReplicateCount, parsePastedPlate } from '../src/logic.js';
+import { activityReferenceDelta, bcaConcentrationToCpr, buildBcaCurve, calculateActivity, emptyBcaConfig, fitLinear, normalizeReplicateCount, parsePastedPlate } from '../src/logic.js';
 import { COMPLEXES } from '../src/logic.js';
 
 test('Complex I follows the protocol example', () => {
@@ -12,6 +12,32 @@ test('Complex I follows the protocol example', () => {
     dilution: 2,
   });
   assert.ok(Math.abs(result - 70.64935) < 0.001);
+});
+
+test('Complex I uses the control well paired with each sample', () => {
+  const plate = {
+    rows: {
+      A: {
+        1: { read1: 0.5, read2: 0.1 },
+        2: { read1: 0.4, read2: 0.1 },
+        3: { read1: 0.8, read2: 0.2 },
+        4: { read1: 0.2, read2: 0.1 },
+      },
+    },
+  };
+  assert.ok(Math.abs(activityReferenceDelta({
+    complexId: 'I',
+    plate,
+    sampleCoordinate: 'A1',
+    controlBySample: { A1: 'A3', A2: 'A4' },
+  }) - 0.6) < 1e-12);
+  assert.ok(Math.abs(activityReferenceDelta({
+    complexId: 'I',
+    plate,
+    sampleCoordinate: 'A2',
+    controlBySample: { A1: 'A3', A2: 'A4' },
+  }) - 0.1) < 1e-12);
+  assert.equal(activityReferenceDelta({ complexId: 'I', plate, sampleCoordinate: 'A1' }), null);
 });
 
 test('Complex II keeps the protocol dilution factor explicit', () => {

@@ -13,6 +13,7 @@ import {
 import * as XLSX from 'xlsx';
 import {
   COMPLEXES,
+  activityReferenceDelta,
   bcaConcentrationToCpr,
   buildBcaCurve,
   calculateActivity,
@@ -231,7 +232,7 @@ function ActivitySection({ bca }) {
   const [odPlate, setOdPlate] = useState(null);
   const [odFileName, setOdFileName] = useState('');
   const [odError, setOdError] = useState('');
-  const [mapping, setMapping] = useState({ control: [], blank: [], sample: [] });
+  const [mapping, setMapping] = useState({ control: [], blank: [], sample: [], controlBySample: {} });
   const [mappingMode, setMappingMode] = useState('sample');
   const [rowInputs, setRowInputs] = useState({});
   const complex = COMPLEXES[selectedComplex];
@@ -239,8 +240,6 @@ function ActivitySection({ bca }) {
   const linkedBcaConcentrations = useMemo(() => Object.fromEntries((bca.selectedSamples || []).map((coordinate) => [coordinate, bcaConcentrationToCpr(estimateConcentration(getWell(bca.plate, coordinate)?.read1, linkedCurve?.regression))])), [bca.plate, bca.selectedSamples, linkedCurve]);
   const activeKey = mappingMode === 'sample' ? 'sample' : selectedComplex === 'I' ? 'control' : 'blank';
   const activeLabel = mappingMode === 'sample' ? '测定孔' : selectedComplex === 'I' ? '对照孔' : '空白孔';
-  const meanDelta = (coordinates) => mean(coordinates.map((coordinate) => delta(getWell(odPlate, coordinate))).filter((value) => Number.isFinite(value)));
-
   const handleComplexChange = (id) => {
     setSelectedComplex(id);
     setParameters(COMPLEXES[id].params);
@@ -253,7 +252,7 @@ function ActivitySection({ bca }) {
       const workbook = await readWorkbook(file);
       setOdPlate(parseWorkbook(workbook, XLSX));
       setOdFileName(file.name);
-      setMapping({ control: [], blank: [], sample: [] });
+      setMapping({ control: [], blank: [], sample: [], controlBySample: {} });
       setRowInputs({});
       setOdError('');
     } catch (caught) { setOdError(caught.message || '无法解析该 OD 文件。'); }
@@ -262,35 +261,60 @@ function ActivitySection({ bca }) {
     try {
       setOdPlate(parsePastedPlate(text));
       setOdFileName('粘贴的 OD 表格');
-      setMapping({ control: [], blank: [], sample: [] });
+      setMapping({ control: [], blank: [], sample: [], controlBySample: {} });
       setRowInputs({});
       setOdError('');
     } catch (caught) { setOdError(caught.message || '无法解析粘贴的 OD 表格。'); }
   };
   const toggleMapping = (coordinate) => setMapping((current) => {
     const currentValues = current[activeKey] || [];
-    return { ...current, [activeKey]: currentValues.includes(coordinate) ? currentValues.filter((item) => item !== coordinate) : [...currentValues, coordinate] };
+    const selected = currentValues.includes(coordinate);
+    const nextValues = selected ? currentValues.filter((item) => item !== coordinate) : [...currentValues, coordinate];
+    const controlBySample = { ...(current.controlBySample || {}) };
+    if (activeKey === 'sample' && selected) delete controlBySample[coordinate];
+    if (activeKey === 'control' && selected) {
+      Object.entries(controlBySample).forEach(([sampleCoordinate, controlCoordinate]) => {
+        if (controlCoordinate === coordinate) delete controlBySample[sampleCoordinate];
+      });
+    }
+    return { ...current, [activeKey]: nextValues, controlBySample };
+  });
+  const updateControlPair = (sampleCoordinate, controlCoordinate) => setMapping((current) => {
+    const controlBySample = { ...(current.controlBySample || {}) };
+    if (controlCoordinate) controlBySample[sampleCoordinate] = controlCoordinate;
+    else delete controlBySample[sampleCoordinate];
+    return { ...current, controlBySample };
   });
   const updateRowInput = (coordinate, key, value) => setRowInputs((current) => {
     const base = current[coordinate] || { name: coordinate, cpr: linkedBcaConcentrations[coordinate] ?? '', dilution: '1' };
     return { ...current, [coordinate]: { ...base, [key]: value } };
   });
   const activityRows = useMemo(() => {
-    const sharedDelta = selectedComplex === 'I' ? meanDelta(mapping.control) : meanDelta(mapping.blank);
     return mapping.sample.map((coordinate) => {
       const input = rowInputs[coordinate] || { name: coordinate, cpr: linkedBcaConcentrations[coordinate] ?? '', dilution: '1' };
+      const controlCoordinate = mapping.controlBySample?.[coordinate] || null;
+      const referenceDelta = activityReferenceDelta({
+        complexId: selectedComplex,
+        plate: odPlate,
+        sampleCoordinate: coordinate,
+        controlBySample: mapping.controlBySample,
+        referenceCoordinates: mapping.blank,
+      });
       const result = calculateActivity({
         complexId: selectedComplex,
-        sample: { controlDelta: selectedComplex === 'I' ? sharedDelta : null, blankDelta: selectedComplex === 'I' ? null : sharedDelta, sampleDelta: delta(getWell(odPlate, coordinate)) },
+        sample: { controlDelta: selectedComplex === 'I' ? referenceDelta : null, blankDelta: selectedComplex === 'I' ? null : referenceDelta, sampleDelta: delta(getWell(odPlate, coordinate)) },
         parameters,
         cpr: input.cpr,
         dilution: input.dilution,
       });
-      return { coordinate, input, sampleDelta: delta(getWell(odPlate, coordinate)), result };
+      return { coordinate, controlCoordinate, input, sampleDelta: delta(getWell(odPlate, coordinate)), referenceDelta, result };
     });
   }, [linkedBcaConcentrations, mapping, odPlate, parameters, rowInputs, selectedComplex]);
   const validResults = activityRows.filter((row) => Number.isFinite(row.result));
-  const sharedDelta = odPlate ? (selectedComplex === 'I' ? meanDelta(mapping.control) : meanDelta(mapping.blank)) : null;
+  const blankDelta = odPlate && selectedComplex !== 'I'
+    ? activityReferenceDelta({ complexId: selectedComplex, plate: odPlate, referenceCoordinates: mapping.blank })
+    : null;
+  const pairedCount = mapping.sample.filter((coordinate) => mapping.controlBySample?.[coordinate]).length;
   const mappingMarkers = Object.fromEntries([
     ...mapping.blank.map((coordinate) => [coordinate, 'activity-blank']),
     ...mapping.control.map((coordinate) => [coordinate, 'activity-control']),
@@ -304,7 +328,7 @@ function ActivitySection({ bca }) {
   return (
     <section className="card" id="activity">
       <div className="section-heading">
-        <div><span className="eyebrow">02 / 活性计算</span><h2>选择 Complex，批量计算 OD 结果</h2><p>先批量配置测定孔和对照/空白孔，再逐行填写样品信息，系统一次性计算所有样品。</p></div>
+        <div><span className="eyebrow">02 / 活性计算</span><h2>选择 Complex，批量计算 OD 结果</h2><p>先批量配置测定孔和对照/空白孔；Complex I 再为每个测定孔指定唯一对照孔，系统逐行计算。</p></div>
         <div className="status-pill"><span className={`status-dot ${odPlate ? 'ok' : ''}`} />{odPlate ? '已读取 OD 数据' : '等待导入'}</div>
       </div>
       <div className="complex-tabs">{Object.values(COMPLEXES).map((item) => <button type="button" key={item.id} className={selectedComplex === item.id ? 'active' : ''} onClick={() => handleComplexChange(item.id)}><span>{item.label}</span><small>{item.name}</small></button>)}</div>
@@ -318,15 +342,22 @@ function ActivitySection({ bca }) {
             <div className="panel calc-panel">
               <div className="panel-header"><h3>板位配置</h3><span className="muted">可多选</span></div>
               <div className="mapping-mode"><span>选择模式</span><button type="button" className={mappingMode === 'sample' ? 'active' : ''} onClick={() => setMappingMode('sample')}>测定孔 ({mapping.sample.length})</button><button type="button" className={mappingMode !== 'sample' ? 'active' : ''} onClick={() => setMappingMode(selectedComplex === 'I' ? 'control' : 'blank')}>{selectedComplex === 'I' ? `对照孔 (${mapping.control.length})` : `空白孔 (${mapping.blank.length})`}</button></div>
-              <div className="selection-summary"><div><span>测定孔</span><b>{mapping.sample.join(', ') || '未选择'}</b></div><div><span>{selectedComplex === 'I' ? '对照孔' : '空白孔'} ΔA 均值</span><b>{formatNumber(sharedDelta, 4)}</b></div></div>
+              <div className="selection-summary">
+                <div><span>测定孔</span><b>{mapping.sample.join(', ') || '未选择'}</b></div>
+                {selectedComplex === 'I' ? <>
+                  <div><span>已选对照孔</span><b>{mapping.control.join(', ') || '未选择'}</b></div>
+                  <div><span>一一匹配</span><b>{pairedCount} / {mapping.sample.length} 个样品</b></div>
+                </> : <div><span>空白孔 ΔA 均值</span><b>{formatNumber(blankDelta, 4)}</b></div>}
+              </div>
               <ParameterPanel complex={complex} parameters={parameters} onChange={(key, value) => setParameters((current) => ({ ...current, [key]: Number(value) }))} />
             </div>
           </div>
           <div className="batch-panel">
             <div className="panel-header"><h3>批量计算明细</h3><span className="muted">已选择 {mapping.sample.length} 个测定孔，已计算 {validResults.length} 个</span></div>
-            {activityRows.length === 0 ? <div className="empty-list">切换到“测定孔”模式，在左侧板图中多选样品孔。</div> : <div className="batch-table-wrap"><table className="batch-table"><thead><tr><th>#</th><th>测定孔</th><th>样品名称</th><th>Cpr（gprot/L）</th><th>稀释倍数 f</th><th>ΔA测</th><th>结果（{complex.unit}）</th></tr></thead><tbody>{activityRows.map((row, index) => <tr key={row.coordinate}><td>{index + 1}</td><td><b>{row.coordinate}</b></td><td><input className="table-input" value={row.input.name} onChange={(event) => updateRowInput(row.coordinate, 'name', event.target.value)} /></td><td><input className="table-input number" type="number" step="any" value={row.input.cpr} onChange={(event) => updateRowInput(row.coordinate, 'cpr', event.target.value)} /></td><td><input className="table-input number" type="number" step="any" value={row.input.dilution} onChange={(event) => updateRowInput(row.coordinate, 'dilution', event.target.value)} /></td><td className="mono-cell">{formatNumber(row.sampleDelta, 4)}</td><td className="result-cell">{formatNumber(row.result, 2)}</td></tr>)}</tbody></table></div>}
+            {selectedComplex === 'I' && activityRows.length > 0 && <div className="pairing-note">Complex I：请在每行选择对应的对照孔；同一对照孔不能重复匹配多个样品。</div>}
+            {activityRows.length === 0 ? <div className="empty-list">切换到“测定孔”模式，在左侧板图中多选样品孔。</div> : <div className="batch-table-wrap"><table className="batch-table"><thead><tr><th>#</th><th>测定孔</th>{selectedComplex === 'I' && <th>对应对照孔</th>}<th>样品名称</th><th>Cpr（gprot/L）</th><th>稀释倍数 f</th>{selectedComplex === 'I' && <th>ΔA对</th>}<th>ΔA测</th><th>结果（{complex.unit}）</th></tr></thead><tbody>{activityRows.map((row, index) => <tr key={row.coordinate}><td>{index + 1}</td><td><b>{row.coordinate}</b></td>{selectedComplex === 'I' && <td><select className="table-select" value={row.controlCoordinate || ''} onChange={(event) => updateControlPair(row.coordinate, event.target.value)}><option value="">选择对照孔</option>{mapping.control.map((coordinate) => <option key={coordinate} value={coordinate} disabled={Object.entries(mapping.controlBySample || {}).some(([sampleCoordinate, controlCoordinate]) => sampleCoordinate !== row.coordinate && controlCoordinate === coordinate)}>{coordinate}</option>)}</select></td>}<td><input className="table-input" value={row.input.name} onChange={(event) => updateRowInput(row.coordinate, 'name', event.target.value)} /></td><td><input className="table-input number" type="number" step="any" value={row.input.cpr} onChange={(event) => updateRowInput(row.coordinate, 'cpr', event.target.value)} /></td><td><input className="table-input number" type="number" step="any" value={row.input.dilution} onChange={(event) => updateRowInput(row.coordinate, 'dilution', event.target.value)} /></td>{selectedComplex === 'I' && <td className="mono-cell">{formatNumber(row.referenceDelta, 4)}</td>}<td className="mono-cell">{formatNumber(row.sampleDelta, 4)}</td><td className="result-cell">{formatNumber(row.result, 2)}</td></tr>)}</tbody></table></div>}
           </div>
-          <div className="result-banner"><div><span>批量计算结果</span><strong>{validResults.length} / {activityRows.length} <em>个有效结果</em></strong><small>{complex.label} · {activeLabel} ΔA均值 {formatNumber(sharedDelta, 4)}</small></div><div className="result-equation">{selectedComplex === 'I' ? '((ΔA对 − ΔA测) × V1 × f × 10⁶) / (6600 × 0.7 × T × V2 × Cpr)' : selectedComplex === 'II' ? '((ΔA测 − ΔA空) × V总 × f × 1000) / (V样 × ε × T × Cpr)' : '((ΔA测 − ΔA空) × V1 × f) / (V2 × ε × d × T × Cpr)'}</div></div>
+          <div className="result-banner"><div><span>批量计算结果</span><strong>{validResults.length} / {activityRows.length} <em>个有效结果</em></strong><small>{selectedComplex === 'I' ? `${complex.label} · 已匹配 ${pairedCount} / ${mapping.sample.length} 个对照孔` : `${complex.label} · 空白孔 ΔA均值 ${formatNumber(blankDelta, 4)}`}</small></div><div className="result-equation">{selectedComplex === 'I' ? '((ΔA对 − ΔA测) × V1 × f × 10⁶) / (6600 × 0.7 × T × V2 × Cpr)' : selectedComplex === 'II' ? '((ΔA测 − ΔA空) × V总 × f × 1000) / (V样 × ε × T × Cpr)' : '((ΔA测 − ΔA空) × V1 × f) / (V2 × ε × d × T × Cpr)'}</div></div>
         </>
       )}
     </section>
