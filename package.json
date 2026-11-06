@@ -1,0 +1,23 @@
+{
+  "name": "complex-activity-calculator",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-dropzone": "latest",
+    "recharts": "latest",
+    "xlsx": "latest"
+  },
+  "devDependencies": {
+    "vite": "latest"
+  }
+}
