@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useDropzone } from 'react-dropzone';
 import {
   CartesianGrid,
@@ -20,6 +20,7 @@ import {
   delta,
   emptyBcaConfig,
   estimateConcentration,
+  findBcaSampleByName,
   formatNumber,
   getWell,
   mean,
@@ -124,7 +125,7 @@ function PlateLegend({ items }) {
   return <div className="plate-legend">{items.map((item) => <span key={item.label}><i className={`legend-swatch ${item.className}`} />{item.label}</span>)}</div>;
 }
 
-function BcaSection({ bca, onFile, onText, onConfig, onSelectSample, onSelectStandard, onActiveStandard, onAddStandard, onRemoveStandard, onMoveStandard, onExport }) {
+function BcaSection({ bca, onFile, onText, onConfig, onSelectSample, onUpdateSample, onSelectStandard, onActiveStandard, onAddStandard, onRemoveStandard, onMoveStandard, onExport }) {
   const curve = bca.plate ? buildBcaCurve(bca.plate, bca.config) : { standardPoints: [], regression: null };
   const activeStandard = bca.config.find((point) => point.id === bca.activeStandardId) || bca.config[0];
   const selectedStandardWells = activeStandard?.wells || [];
@@ -199,7 +200,7 @@ function BcaSection({ bca, onFile, onText, onConfig, onSelectSample, onSelectSta
               <div className="mini-note">标准品浓度以 μg/mL 输入；活性计算中的 Cpr 会自动换算为 gprot/L。未被标为标准品的孔可在下方作为样品使用。</div>
             </div>
           </div>
-          <div className="subsection-title"><span>样品蛋白浓度</span><small>点击板位可选择样品，浓度由标准曲线反算。</small></div>
+          <div className="subsection-title"><span>样品蛋白浓度</span><small>点击板位选择样品，再编辑样本名并指定对应 Complex。</small></div>
           <div className="sample-concentration-grid">
             <div className="panel plate-panel"><PlatePreview plate={bca.plate} selected={bca.selectedSamples} selectionRole="sample" markerByCoordinate={allStandardMarkers} markerLabels={standardMarkerLabels} onSelect={onSelectSample} /><PlateLegend items={[{ label: '已选样品', className: 'sample' }, { label: '标准品孔', className: 'standard-other' }]} /></div>
             <div className="panel sample-list">
@@ -207,7 +208,15 @@ function BcaSection({ bca, onFile, onText, onConfig, onSelectSample, onSelectSta
               {bca.selectedSamples.length === 0 ? <div className="empty-list">从左侧板图点选样品孔。</div> : bca.selectedSamples.map((coordinate) => {
                 const well = bca.plate.rows[coordinate[0]]?.[Number(coordinate.slice(1))];
                 const concentration = estimateConcentration(well?.read1, curve.regression);
-                return <div className="sample-row" key={coordinate}><div><b>{coordinate}</b><span>OD {formatNumber(well?.read1, 4)} · Cpr {formatNumber(bcaConcentrationToCpr(concentration), 4)} gprot/L</span></div><strong>{formatNumber(concentration, 2)} <em>μg/mL</em></strong></div>;
+                const sample = bca.sampleMeta?.[coordinate] || { name: coordinate, complexId: '' };
+                return <div className="sample-row sample-row-editable" key={coordinate}>
+                  <div className="sample-row-fields">
+                    <div className="sample-well-label"><b>{coordinate}</b><span>OD {formatNumber(well?.read1, 4)}</span></div>
+                    <label className="sample-edit-field"><span>样本名</span><input value={sample.name} onChange={(event) => onUpdateSample(coordinate, 'name', event.target.value)} /></label>
+                    <label className="sample-edit-field"><span>对应 Complex</span><select value={sample.complexId} onChange={(event) => onUpdateSample(coordinate, 'complexId', event.target.value)}><option value="">请选择</option><option value="I">Complex I</option><option value="II">Complex II</option><option value="IV">Complex IV</option></select></label>
+                  </div>
+                  <div className="sample-row-values"><span>Cpr {formatNumber(bcaConcentrationToCpr(concentration), 4)} gprot/L</span><strong>{formatNumber(concentration, 2)} <em>μg/mL</em></strong></div>
+                </div>;
               })}
             </div>
           </div>
@@ -226,7 +235,7 @@ function ParameterPanel({ complex, parameters, onChange }) {
   return <details className="parameters"><summary>查看 / 修改协议参数</summary><div className="parameter-grid">{fields.map(([key, label, suffix]) => <Field key={key} label={label} value={parameters[key]} onChange={(value) => onChange(key, value)} suffix={suffix} />)}</div></details>;
 }
 
-function ActivitySection({ bca }) {
+function ActivitySection({ bca, onNotify }) {
   const [selectedComplex, setSelectedComplex] = useState('I');
   const [parameters, setParameters] = useState(COMPLEXES.I.params);
   const [odPlate, setOdPlate] = useState(null);
@@ -237,13 +246,44 @@ function ActivitySection({ bca }) {
   const [rowInputs, setRowInputs] = useState({});
   const complex = COMPLEXES[selectedComplex];
   const linkedCurve = bca.plate ? buildBcaCurve(bca.plate, bca.config) : null;
-  const linkedBcaConcentrations = useMemo(() => Object.fromEntries((bca.selectedSamples || []).map((coordinate) => [coordinate, bcaConcentrationToCpr(estimateConcentration(getWell(bca.plate, coordinate)?.read1, linkedCurve?.regression))])), [bca.plate, bca.selectedSamples, linkedCurve]);
+  const linkedBcaSamples = useMemo(() => (bca.selectedSamples || []).map((coordinate) => {
+    const sample = bca.sampleMeta?.[coordinate] || { name: coordinate, complexId: '' };
+    const well = getWell(bca.plate, coordinate);
+    const concentration = estimateConcentration(well?.read1, linkedCurve?.regression);
+    return {
+      coordinate,
+      name: String(sample.name || coordinate).trim(),
+      complexId: sample.complexId || '',
+      concentration,
+      cpr: bcaConcentrationToCpr(concentration),
+    };
+  }).filter((sample) => sample.complexId === selectedComplex && sample.name), [bca.plate, bca.config, bca.sampleMeta, bca.selectedSamples, linkedCurve, selectedComplex]);
+  useEffect(() => {
+    setRowInputs((current) => {
+      let changed = false;
+      const next = Object.fromEntries(Object.entries(current).map(([coordinate, input]) => {
+        if (!input.bcaCoordinate) return [coordinate, input];
+        const linkedSample = linkedBcaSamples.find((sample) => sample.coordinate === input.bcaCoordinate);
+        if (!linkedSample) {
+          changed = true;
+          return [coordinate, { ...input, bcaCoordinate: '', cpr: '' }];
+        }
+        if (input.name !== linkedSample.name || input.cpr !== linkedSample.cpr) {
+          changed = true;
+          return [coordinate, { ...input, name: linkedSample.name, cpr: linkedSample.cpr }];
+        }
+        return [coordinate, input];
+      }));
+      return changed ? next : current;
+    });
+  }, [linkedBcaSamples]);
   const activeKey = mappingMode === 'sample' ? 'sample' : selectedComplex === 'I' ? 'control' : 'blank';
   const activeLabel = mappingMode === 'sample' ? '测定孔' : selectedComplex === 'I' ? '对照孔' : '空白孔';
   const handleComplexChange = (id) => {
     setSelectedComplex(id);
     setParameters(COMPLEXES[id].params);
     setMappingMode('sample');
+    setRowInputs({});
   };
   const handleOdFile = async (file, error) => {
     if (error) { setOdError(error); return; }
@@ -286,12 +326,16 @@ function ActivitySection({ bca }) {
     return { ...current, controlBySample };
   });
   const updateRowInput = (coordinate, key, value) => setRowInputs((current) => {
-    const base = current[coordinate] || { name: coordinate, cpr: linkedBcaConcentrations[coordinate] ?? '', dilution: '1' };
+    const base = current[coordinate] || { name: coordinate, cpr: '', dilution: '1' };
+    if (key === 'name') {
+      const linkedSample = findBcaSampleByName(linkedBcaSamples, value);
+      return { ...current, [coordinate]: { ...base, name: value, cpr: linkedSample?.cpr ?? '', bcaCoordinate: linkedSample?.coordinate || '' } };
+    }
     return { ...current, [coordinate]: { ...base, [key]: value } };
   });
   const activityRows = useMemo(() => {
     return mapping.sample.map((coordinate) => {
-      const input = rowInputs[coordinate] || { name: coordinate, cpr: linkedBcaConcentrations[coordinate] ?? '', dilution: '1' };
+      const input = rowInputs[coordinate] || { name: coordinate, cpr: '', dilution: '1' };
       const controlCoordinate = mapping.controlBySample?.[coordinate] || null;
       const referenceDelta = activityReferenceDelta({
         complexId: selectedComplex,
@@ -309,7 +353,7 @@ function ActivitySection({ bca }) {
       });
       return { coordinate, controlCoordinate, input, sampleDelta: delta(getWell(odPlate, coordinate)), referenceDelta, result };
     });
-  }, [linkedBcaConcentrations, mapping, odPlate, parameters, rowInputs, selectedComplex]);
+  }, [mapping, odPlate, parameters, rowInputs, selectedComplex]);
   const validResults = activityRows.filter((row) => Number.isFinite(row.result));
   const blankDelta = odPlate && selectedComplex !== 'I'
     ? activityReferenceDelta({ complexId: selectedComplex, plate: odPlate, referenceCoordinates: mapping.blank })
@@ -325,6 +369,39 @@ function ActivitySection({ bca }) {
     ...mapping.control.map((coordinate) => [coordinate, '对照孔']),
     ...mapping.sample.map((coordinate) => [coordinate, '测定孔']),
   ]);
+  const exportActivityResults = () => {
+    if (!odPlate || !validResults.length) {
+      onNotify?.('请先完成至少一个有效活性结果');
+      return;
+    }
+    const resultRows = activityRows.map((row, index) => {
+      const linkedSample = findBcaSampleByName(linkedBcaSamples, row.input.name);
+      return {
+        序号: index + 1,
+        Complex: complex.label,
+        样本名: row.input.name,
+        BCA关联孔位: linkedSample?.coordinate || '',
+        测定孔: row.coordinate,
+        对照孔: selectedComplex === 'I' ? row.controlCoordinate || '' : '',
+        空白孔: selectedComplex === 'I' ? '' : mapping.blank.join(', '),
+        'ΔA对': selectedComplex === 'I' && Number.isFinite(row.referenceDelta) ? row.referenceDelta : '',
+        'ΔA空': selectedComplex !== 'I' && Number.isFinite(row.referenceDelta) ? row.referenceDelta : '',
+        'ΔA测': Number.isFinite(row.sampleDelta) ? row.sampleDelta : '',
+        Cpr: row.input.cpr,
+        Cpr单位: 'gprot/L',
+        稀释倍数: row.input.dilution,
+        酶活性: Number.isFinite(row.result) ? row.result : '',
+        活性单位: complex.unit,
+      };
+    });
+    const parameterRows = Object.entries(parameters).map(([key, value]) => ({ 参数: key, 数值: value }));
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(resultRows), '活性结果');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(parameterRows), '协议参数');
+    const date = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(workbook, `ComplexLab_${complex.label}_活性结果_${date}.xlsx`);
+    onNotify?.('Complex 活性结果已导出');
+  };
   return (
     <section className="card" id="activity">
       <div className="section-heading">
@@ -353,9 +430,9 @@ function ActivitySection({ bca }) {
             </div>
           </div>
           <div className="batch-panel">
-            <div className="panel-header"><h3>批量计算明细</h3><span className="muted">已选择 {mapping.sample.length} 个测定孔，已计算 {validResults.length} 个</span></div>
+            <div className="panel-header"><h3>批量计算明细</h3><div className="panel-header-actions"><span className="muted">已选择 {mapping.sample.length} 个测定孔，已计算 {validResults.length} 个</span><button type="button" className="export-button" disabled={!validResults.length} onClick={exportActivityResults}>导出 XLSX</button></div></div>
             {selectedComplex === 'I' && activityRows.length > 0 && <div className="pairing-note">Complex I：请在每行选择对应的对照孔；同一对照孔不能重复匹配多个样品。</div>}
-            {activityRows.length === 0 ? <div className="empty-list">切换到“测定孔”模式，在左侧板图中多选样品孔。</div> : <div className="batch-table-wrap"><table className="batch-table"><thead><tr><th>#</th><th>测定孔</th>{selectedComplex === 'I' && <th>对应对照孔</th>}<th>样品名称</th><th>Cpr（gprot/L）</th><th>稀释倍数 f</th>{selectedComplex === 'I' && <th>ΔA对</th>}<th>ΔA测</th><th>结果（{complex.unit}）</th></tr></thead><tbody>{activityRows.map((row, index) => <tr key={row.coordinate}><td>{index + 1}</td><td><b>{row.coordinate}</b></td>{selectedComplex === 'I' && <td><select className="table-select" value={row.controlCoordinate || ''} onChange={(event) => updateControlPair(row.coordinate, event.target.value)}><option value="">选择对照孔</option>{mapping.control.map((coordinate) => <option key={coordinate} value={coordinate} disabled={Object.entries(mapping.controlBySample || {}).some(([sampleCoordinate, controlCoordinate]) => sampleCoordinate !== row.coordinate && controlCoordinate === coordinate)}>{coordinate}</option>)}</select></td>}<td><input className="table-input" value={row.input.name} onChange={(event) => updateRowInput(row.coordinate, 'name', event.target.value)} /></td><td><input className="table-input number" type="number" step="any" value={row.input.cpr} onChange={(event) => updateRowInput(row.coordinate, 'cpr', event.target.value)} /></td><td><input className="table-input number" type="number" step="any" value={row.input.dilution} onChange={(event) => updateRowInput(row.coordinate, 'dilution', event.target.value)} /></td>{selectedComplex === 'I' && <td className="mono-cell">{formatNumber(row.referenceDelta, 4)}</td>}<td className="mono-cell">{formatNumber(row.sampleDelta, 4)}</td><td className="result-cell">{formatNumber(row.result, 2)}</td></tr>)}</tbody></table></div>}
+            {activityRows.length === 0 ? <div className="empty-list">切换到“测定孔”模式，在左侧板图中多选样品孔。</div> : <div className="batch-table-wrap"><table className="batch-table"><thead><tr><th>#</th><th>测定孔</th>{selectedComplex === 'I' && <th>对应对照孔</th>}<th>样品名称</th><th>Cpr（gprot/L）</th><th>稀释倍数 f</th>{selectedComplex === 'I' && <th>ΔA对</th>}<th>ΔA测</th><th>结果（{complex.unit}）</th></tr></thead><tbody>{activityRows.map((row, index) => <tr key={row.coordinate}><td>{index + 1}</td><td><b>{row.coordinate}</b></td>{selectedComplex === 'I' && <td><select className="table-select" value={row.controlCoordinate || ''} onChange={(event) => updateControlPair(row.coordinate, event.target.value)}><option value="">选择对照孔</option>{mapping.control.map((coordinate) => <option key={coordinate} value={coordinate} disabled={Object.entries(mapping.controlBySample || {}).some(([sampleCoordinate, controlCoordinate]) => sampleCoordinate !== row.coordinate && controlCoordinate === coordinate)}>{coordinate}</option>)}</select></td>}<td><input className="table-input" list={`bca-sample-names-${selectedComplex}-${row.coordinate}`} value={row.input.name} onChange={(event) => updateRowInput(row.coordinate, 'name', event.target.value)} /><datalist id={`bca-sample-names-${selectedComplex}-${row.coordinate}`}>{linkedBcaSamples.map((sample) => <option key={sample.coordinate} value={sample.name} label={`${sample.coordinate} · Cpr ${formatNumber(sample.cpr, 4)}`} />)}</datalist></td><td><input className="table-input number" type="number" step="any" value={row.input.cpr} onChange={(event) => updateRowInput(row.coordinate, 'cpr', event.target.value)} /></td><td><input className="table-input number" type="number" step="any" value={row.input.dilution} onChange={(event) => updateRowInput(row.coordinate, 'dilution', event.target.value)} /></td>{selectedComplex === 'I' && <td className="mono-cell">{formatNumber(row.referenceDelta, 4)}</td>}<td className="mono-cell">{formatNumber(row.sampleDelta, 4)}</td><td className="result-cell">{formatNumber(row.result, 2)}</td></tr>)}</tbody></table></div>}
           </div>
           <div className="result-banner"><div><span>批量计算结果</span><strong>{validResults.length} / {activityRows.length} <em>个有效结果</em></strong><small>{selectedComplex === 'I' ? `${complex.label} · 已匹配 ${pairedCount} / ${mapping.sample.length} 个对照孔` : `${complex.label} · 空白孔 ΔA均值 ${formatNumber(blankDelta, 4)}`}</small></div><div className="result-equation">{selectedComplex === 'I' ? '((ΔA对 − ΔA测) × V1 × f × 10⁶) / (6600 × 0.7 × T × V2 × Cpr)' : selectedComplex === 'II' ? '((ΔA测 − ΔA空) × V总 × f × 1000) / (V样 × ε × T × Cpr)' : '((ΔA测 − ΔA空) × V1 × f) / (V2 × ε × d × T × Cpr)'}</div></div>
         </>
@@ -372,6 +449,7 @@ function App() {
     config: emptyBcaConfig(),
     activeStandardId: 'std-1',
     selectedSamples: [],
+    sampleMeta: {},
   });
   const [toast, setToast] = useState('');
   const handleBcaFile = async (file, error) => {
@@ -380,7 +458,7 @@ function App() {
     try {
       const workbook = await readWorkbook(file);
       const plate = parseWorkbook(workbook, XLSX);
-      setBca((current) => ({ ...current, plate, fileName: file.name, error: '', config: emptyBcaConfig(), activeStandardId: 'std-1', selectedSamples: [] }));
+      setBca((current) => ({ ...current, plate, fileName: file.name, error: '', config: emptyBcaConfig(), activeStandardId: 'std-1', selectedSamples: [], sampleMeta: {} }));
       setToast('BCA 表格已读取');
       window.setTimeout(() => setToast(''), 2200);
     } catch (caught) { setBca((current) => ({ ...current, error: caught.message || '无法解析该 BCA 文件。' })); }
@@ -388,7 +466,7 @@ function App() {
   const handleBcaText = (text) => {
     try {
       const plate = parsePastedPlate(text);
-      setBca((current) => ({ ...current, plate, fileName: '粘贴的 BCA 表格', error: '', config: emptyBcaConfig(), activeStandardId: 'std-1', selectedSamples: [] }));
+      setBca((current) => ({ ...current, plate, fileName: '粘贴的 BCA 表格', error: '', config: emptyBcaConfig(), activeStandardId: 'std-1', selectedSamples: [], sampleMeta: {} }));
       setToast('BCA 表格已读取');
       window.setTimeout(() => setToast(''), 2200);
     } catch (caught) { setBca((current) => ({ ...current, error: caught.message || '无法解析粘贴的 BCA 表格。' })); }
@@ -405,13 +483,25 @@ function App() {
   const toggleBcaSample = (coordinate) => setBca((current) => {
     const isStandard = current.config.some((point) => point.wells.includes(coordinate));
     if (isStandard) return current;
+    const isSelected = current.selectedSamples.includes(coordinate);
+    const sampleMeta = { ...(current.sampleMeta || {}) };
+    if (isSelected) delete sampleMeta[coordinate];
+    else sampleMeta[coordinate] = { name: coordinate, complexId: '' };
     return {
       ...current,
-      selectedSamples: current.selectedSamples.includes(coordinate)
+      sampleMeta,
+      selectedSamples: isSelected
         ? current.selectedSamples.filter((item) => item !== coordinate)
         : [...current.selectedSamples, coordinate],
     };
   });
+  const updateBcaSample = (coordinate, key, value) => setBca((current) => ({
+    ...current,
+    sampleMeta: {
+      ...(current.sampleMeta || {}),
+      [coordinate]: { ...(current.sampleMeta?.[coordinate] || { name: coordinate, complexId: '' }), [key]: value },
+    },
+  }));
   const toggleBcaStandard = (coordinate) => setBca((current) => {
     const active = current.config.find((point) => point.id === current.activeStandardId);
     if (!active) return current;
@@ -429,6 +519,9 @@ function App() {
       selectedSamples: isRemoving
         ? current.selectedSamples
         : current.selectedSamples.filter((item) => item !== coordinate),
+      sampleMeta: isRemoving
+        ? current.sampleMeta
+        : Object.fromEntries(Object.entries(current.sampleMeta || {}).filter(([sampleCoordinate]) => sampleCoordinate !== coordinate)),
     };
   });
   const addBcaStandard = () => setBca((current) => {
@@ -466,13 +559,17 @@ function App() {
     }
     const sampleRows = bca.selectedSamples.map((coordinate, index) => {
       const well = getWell(bca.plate, coordinate);
+      const sample = bca.sampleMeta?.[coordinate] || { name: coordinate, complexId: '' };
+      const concentration = estimateConcentration(well?.read1, curve.regression);
       return {
         序号: index + 1,
         孔位: coordinate,
+        样本名: sample.name,
+        对应Complex: sample.complexId ? `Complex ${sample.complexId}` : '',
         OD562: well?.read1 ?? '',
-        蛋白浓度: estimateConcentration(well?.read1, curve.regression) ?? '',
+        蛋白浓度: concentration ?? '',
         蛋白浓度单位: 'μg/mL',
-        Cpr: bcaConcentrationToCpr(estimateConcentration(well?.read1, curve.regression)) ?? '',
+        Cpr: bcaConcentrationToCpr(concentration) ?? '',
         Cpr单位: 'gprot/L',
       };
     });
@@ -514,6 +611,7 @@ function App() {
           onText={handleBcaText}
           onConfig={updateBcaConfig}
           onSelectSample={toggleBcaSample}
+          onUpdateSample={updateBcaSample}
           onSelectStandard={toggleBcaStandard}
           onActiveStandard={(id) => setBca((current) => ({ ...current, activeStandardId: id }))}
           onAddStandard={addBcaStandard}
@@ -521,7 +619,7 @@ function App() {
           onMoveStandard={moveBcaStandard}
           onExport={exportBcaResults}
         />
-        <ActivitySection bca={bca} />
+        <ActivitySection bca={bca} onNotify={(message) => { setToast(message); window.setTimeout(() => setToast(''), 2200); }} />
         <section className="card help-card" id="help"><div className="section-heading"><div><span className="eyebrow">03 / 使用说明</span><h2>留下一条可复核的计算链</h2><p>原始文件只负责提供 OD；标准浓度、板位映射、稀释倍数和蛋白浓度都是明确的输入。</p></div></div><div className="help-grid"><div><b>1. BCA</b><span>导入表格，配置标准品浓度、复孔和孔位，再选择样品孔。</span></div><div><b>2. OD</b><span>选择 Complex 后导入对应文件，批量选择测定孔和对照/空白孔。</span></div><div><b>3. 审核</b><span>查看公式、参数和 ΔA，确认结果处于试剂盒线性范围内后再记录或进一步分析。</span></div></div><div className="warning-note">研究用途计算辅助工具。最终结果请结合原始实验记录、试剂盒说明书和实验质量控制判断。</div></section>
       </main>
       {toast && <div className="toast">✓ {toast}</div>}

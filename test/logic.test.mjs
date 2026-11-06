@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activityReferenceDelta, bcaConcentrationToCpr, buildBcaCurve, calculateActivity, emptyBcaConfig, fitLinear, normalizeReplicateCount, parsePastedPlate } from '../src/logic.js';
+import { activityReferenceDelta, bcaConcentrationToCpr, buildBcaCurve, calculateActivity, emptyBcaConfig, findBcaSampleByName, fitLinear, normalizeReplicateCount, parsePastedPlate } from '../src/logic.js';
 import { COMPLEXES } from '../src/logic.js';
 
 test('Complex I follows the protocol example', () => {
@@ -102,4 +102,11 @@ test('BCA curve uses configured wells and averages replicates', () => {
 test('BCA defaults use micrograms per milliliter and convert to Cpr units', () => {
   assert.deepEqual(emptyBcaConfig().map((point) => point.concentration), [0, 125, 250, 500, 750, 1000, 1500, 2000]);
   assert.equal(bcaConcentrationToCpr(125), 0.125);
+});
+
+test('BCA sample names resolve to one matching protein concentration', () => {
+  const samples = [{ name: '样本甲', coordinate: 'A1', cpr: 0.125 }, { name: '样本乙', coordinate: 'A2', cpr: 0.25 }];
+  assert.deepEqual(findBcaSampleByName(samples, ' 样本甲 '), samples[0]);
+  assert.equal(findBcaSampleByName(samples, '不存在'), null);
+  assert.equal(findBcaSampleByName([{ name: '重复', cpr: 0.1 }, { name: '重复', cpr: 0.2 }], '重复'), null);
 });

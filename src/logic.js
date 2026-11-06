@@ -63,6 +63,13 @@ export function bcaConcentrationToCpr(value) {
   return concentration === null ? null : concentration / 1000;
 }
 
+export function findBcaSampleByName(samples, name) {
+  const normalizedName = String(name ?? '').trim();
+  if (!normalizedName) return null;
+  const matches = samples.filter((sample) => String(sample.name ?? '').trim() === normalizedName);
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export function normalizeReplicateCount(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(1, Math.floor(parsed)) : 1;
